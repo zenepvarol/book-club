@@ -1,0 +1,1483 @@
+<!DOCTYPE html>
+<html lang="tr" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Online Kitap Kulübü | Book Club Hub</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        warm: {
+                            50: '#faf8f5',
+                            100: '#f4efe6',
+                            200: '#e6dac8',
+                            300: '#d4be9f',
+                            700: '#5c4838',
+                            800: '#3d2f24',
+                            900: '#261c16',
+                        },
+                        cozy: {
+                            bg: '#161412',
+                            card: '#221f1c',
+                            border: '#36322d',
+                            accent: '#d9a362',
+                            accentHover: '#c48f4e'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        serif: ['Merriweather', 'serif']
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Google Fonts & FontAwesome Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Merriweather:ital,wght@0,400;0,700;1,300&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Firebase Imports (HTML Module) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase Configuration & Variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'book-club-hub-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "demo-key",
+            authDomain: "demo-app.firebaseapp.com",
+            projectId: "demo-app",
+            storageBucket: "demo-app.appspot.com",
+            messagingSenderId: "123456789",
+            appId: "1:123456789:web:demo"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        window.db = db;
+        window.appId = appId;
+        window.auth = auth;
+
+        // Firebase Auth Init
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                console.warn("Firebase Auth fallback to anonymous:", err);
+                try { await signInAnonymously(auth); } catch(e) {}
+            }
+        }
+
+        // Firestore Strict Path: /artifacts/{appId}/public/data/
+        const publicCollectionPath = ['artifacts', appId, 'public', 'data'];
+
+        // Live Real-Time Data Listeners
+        window.initFirestoreListeners = function() {
+            if (!auth.currentUser) return;
+
+            // 1. Current Read Document Listener
+            const currentDocRef = doc(db, ...publicCollectionPath, 'currentReadDoc', 'data');
+            onSnapshot(currentDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    window.currentRead = docSnap.data().book || null;
+                } else {
+                    window.saveCurrentReadToDb(window.currentRead);
+                }
+                window.renderCurrentRead();
+            }, (error) => console.error("CurrentRead Snapshot Error:", error));
+
+            // 2. TBR List Listener
+            const tbrColRef = collection(db, ...publicCollectionPath, 'tbrCollection');
+            onSnapshot(tbrColRef, (snapshot) => {
+                const list = [];
+                snapshot.forEach(d => list.push({ id: d.id, ...d.data() }));
+                if (list.length > 0 || snapshot.metadata.hasPendingWrites) {
+                    window.tbrList = list;
+                } else if (snapshot.empty && window.tbrList.length > 0) {
+                    // Seed initial data if remote empty
+                    window.tbrList.forEach(b => window.saveTbrBookToDb(b));
+                }
+                window.renderTbrCategories();
+                window.renderTbrBooks();
+                window.setupSlotCategorySelect();
+                window.updateSlotMaxFromSelect();
+            }, (error) => console.error("TBR Snapshot Error:", error));
+
+            // 3. Archive Books Listener
+            const arcColRef = collection(db, ...publicCollectionPath, 'archiveCollection');
+            onSnapshot(arcColRef, (snapshot) => {
+                const list = [];
+                snapshot.forEach(d => list.push({ id: d.id, ...d.data() }));
+                if (list.length > 0 || snapshot.metadata.hasPendingWrites) {
+                    window.archiveBooks = list;
+                } else if (snapshot.empty && window.archiveBooks.length > 0) {
+                    // Seed initial archive
+                    window.archiveBooks.forEach(b => window.saveArchiveBookToDb(b));
+                }
+                window.renderArchive();
+                window.renderAnalytics();
+            }, (error) => console.error("Archive Snapshot Error:", error));
+
+            // 4. Bingo Progress Listener
+            const bingoDocRef = doc(db, ...publicCollectionPath, 'bingoDoc', 'data');
+            onSnapshot(bingoDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    window.bingoCompleted = docSnap.data().completed || [];
+                } else {
+                    window.saveBingoToDb(window.bingoCompleted);
+                }
+                window.renderBingo();
+            }, (error) => console.error("Bingo Snapshot Error:", error));
+        };
+
+        // Firestore Helper Functions Exposed to Window
+        window.saveCurrentReadToDb = async function(bookData) {
+            if (!auth.currentUser) return;
+            const currentDocRef = doc(db, ...publicCollectionPath, 'currentReadDoc', 'data');
+            await setDoc(currentDocRef, { book: bookData || null });
+        };
+
+        window.saveTbrBookToDb = async function(book) {
+            if (!auth.currentUser) return;
+            const docRef = doc(db, ...publicCollectionPath, 'tbrCollection', book.id);
+            const cleanBook = JSON.parse(JSON.stringify(book));
+            await setDoc(docRef, cleanBook);
+        };
+
+        window.deleteTbrBookFromDb = async function(id) {
+            if (!auth.currentUser) return;
+            const { deleteDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+            const docRef = doc(db, ...publicCollectionPath, 'tbrCollection', id);
+            await deleteDoc(docRef);
+        };
+
+        window.saveArchiveBookToDb = async function(book) {
+            if (!auth.currentUser) return;
+            const docRef = doc(db, ...publicCollectionPath, 'archiveCollection', book.id);
+            const cleanBook = JSON.parse(JSON.stringify(book));
+            await setDoc(docRef, cleanBook);
+        };
+
+        window.deleteArchiveBookFromDb = async function(id) {
+            if (!auth.currentUser) return;
+            const { deleteDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+            const docRef = doc(db, ...publicCollectionPath, 'archiveCollection', id);
+            await deleteDoc(docRef);
+        };
+
+        window.saveBingoToDb = async function(completedArray) {
+            if (!auth.currentUser) return;
+            const bingoDocRef = doc(db, ...publicCollectionPath, 'bingoDoc', 'data');
+            const safeCompleted = Array.isArray(completedArray) 
+                ? completedArray.filter(item => item !== undefined && item !== null)
+                : [];
+            await setDoc(bingoDocRef, { completed: safeCompleted });
+        };
+
+        // Initialize Auth and then start listeners
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                window.initFirestoreListeners();
+            }
+        });
+
+        initAuth();
+    </script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #161412;
+            color: #f4efe6;
+        }
+        .serif-title {
+            font-family: 'Merriweather', serif;
+        }
+        .bingo-cell.completed {
+            background-color: rgba(217, 163, 98, 0.2);
+            border-color: #d9a362;
+            color: #d9a362;
+        }
+        .bingo-cell.completed::after {
+            content: "✓";
+            position: absolute;
+            top: 4px;
+            right: 6px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between">
+
+    <!-- HEADER / NAVIGATION -->
+    <header class="sticky top-0 z-40 bg-cozy-card/90 backdrop-blur-md border-b border-cozy-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo -->
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-cozy-accent/10 border border-cozy-accent/30 flex items-center justify-center text-cozy-accent">
+                        <i class="fa-solid fa-book-bookmark text-lg"></i>
+                    </div>
+                    <div>
+                        <h1 class="serif-title font-bold text-lg text-warm-100 leading-none">Kitap Kulübü</h1>
+                        <span class="text-[10px] text-cozy-accent tracking-widest uppercase">Online Reading Hub</span>
+                    </div>
+                </div>
+
+                <!-- Navigation Links -->
+                <nav class="hidden md:flex items-center space-x-6 text-sm font-medium">
+                    <a href="#current-read" class="text-warm-200 hover:text-cozy-accent transition">Şu An Okunan</a>
+                    <a href="#tbr-section" class="text-warm-200 hover:text-cozy-accent transition">Okunacaklar (TBR)</a>
+                    <a href="#kura-section" class="text-warm-200 hover:text-cozy-accent transition flex items-center gap-1.5">
+                        <i class="fa-solid fa-[#d9a362] fa-dice text-cozy-accent"></i> Kura Çarkı
+                    </a>
+                    <a href="#archive-section" class="text-warm-200 hover:text-cozy-accent transition">Arşiv & Kitaplar</a>
+                    <a href="#analytics-section" class="text-warm-200 hover:text-cozy-accent transition">İstatistikler</a>
+                    <a href="#bingo-section" class="text-warm-200 hover:text-cozy-accent transition">Book Bingo</a>
+                </nav>
+
+                <!-- Admin Action Button & Wheel Trigger -->
+                <div class="flex items-center space-x-3">
+                    <button onclick="toggleWheelDrawer()" class="p-2.5 rounded-xl bg-cozy-border hover:bg-cozy-accent/20 text-cozy-accent transition flex items-center justify-center" title="Hızlı Kura">
+                        <i class="fa-solid fa-dice-five text-base"></i>
+                    </button>
+                    <button id="adminToggleBtn" onclick="toggleAdminMode()" class="px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center space-x-2 border border-cozy-border bg-cozy-bg hover:border-cozy-accent text-warm-200">
+                        <i class="fa-solid fa-user-gear"></i>
+                        <span id="adminBtnText">Admin Modu: Kapalı</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- ADMIN QUICK ACTION BAR -->
+    <div id="adminBar" class="hidden bg-cozy-accent/10 border-b border-cozy-accent/30 py-2.5 px-4">
+        <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div class="flex items-center space-x-2 text-cozy-accent">
+                <i class="fa-solid fa-shield-halved"></i>
+                <span class="font-bold">Yönetici Paneli Aktif: Tüm kulüp üyeleri düzenleme yapabilir.</span>
+            </div>
+            <div class="flex items-center space-x-3">
+                <button onclick="openModal('addTbrModal')" class="px-3 py-1.5 bg-cozy-accent hover:bg-cozy-accentHover text-cozy-bg font-bold rounded-lg transition flex items-center gap-1.5">
+                    <i class="fa-solid fa-plus"></i> TBR'ye Kitap Ekle
+                </button>
+                <button onclick="openModal('changeCurrentModal')" class="px-3 py-1.5 bg-cozy-card hover:bg-cozy-border border border-cozy-border text-warm-100 font-semibold rounded-lg transition flex items-center gap-1.5">
+                    <i class="fa-solid fa-pen-to-square"></i> Şu An Okunanı Değiştir
+                </button>
+                <button onclick="openModal('addArchiveModal')" class="px-3 py-1.5 bg-cozy-card hover:bg-cozy-border border border-cozy-border text-warm-100 font-semibold rounded-lg transition flex items-center gap-1.5">
+                    <i class="fa-solid fa-box-archive"></i> Arşive Kitap Ekle
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN CONTENT CONTAINER -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-16 flex-grow">
+
+        <!-- 1. CURRENT READ SECTION -->
+        <section id="current-read" class="relative">
+            <div class="bg-cozy-card border border-cozy-border rounded-3xl p-6 sm:p-8 shadow-2xl overflow-hidden relative">
+                <div class="absolute -top-24 -right-24 w-72 h-72 bg-cozy-accent/5 rounded-full blur-3xl pointer-events-none"></div>
+                
+                <div class="flex items-center justify-between border-b border-cozy-border pb-4 mb-6">
+                    <div class="flex items-center space-x-2">
+                        <span class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <h2 class="serif-title text-xl font-bold text-warm-100">Şu An Ne Okuyoruz?</h2>
+                    </div>
+                    <span class="text-xs font-semibold text-cozy-accent uppercase tracking-wider bg-cozy-accent/10 px-3 py-1 rounded-full border border-cozy-accent/20">
+                        Aktif Kulüp Kitabı
+                    </span>
+                </div>
+
+                <div id="currentReadContainer">
+                    <!-- Dynamic rendering via JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- 2. TBR (OKUNACAKLAR) CATEGORIZED LIST SECTION -->
+        <section id="tbr-section" class="space-y-6">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-cozy-border pb-4">
+                <div>
+                    <h2 class="serif-title text-2xl font-bold text-warm-100">Okunacaklar Listesi (TBR)</h2>
+                    <p class="text-xs text-warm-300 mt-1">Sayfa sayılarına göre kategorilere ayrılmış aday kitaplar</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span id="tbrTotalBadge" class="text-xs font-bold bg-cozy-card border border-cozy-border px-3 py-1.5 rounded-xl text-cozy-accent">
+                        0 Kitap
+                    </span>
+                    <div id="tbrAddBtnWrapper" class="hidden">
+                        <button onclick="openModal('addTbrModal')" class="px-3.5 py-1.5 bg-cozy-accent text-cozy-bg font-bold rounded-xl text-xs hover:bg-cozy-accentHover transition flex items-center gap-1.5">
+                            <i class="fa-solid fa-plus"></i> Kitap Ekle
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TBR Category Tabs -->
+            <div class="flex flex-wrap items-center gap-2" id="tbrCategoryTabs">
+                <!-- Dynamic Category Tabs -->
+            </div>
+
+            <!-- TBR Book Grid -->
+            <div id="tbrGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 sm:gap-6">
+                <!-- Dynamic Book Cards -->
+            </div>
+        </section>
+
+        <!-- 3. SLOT / KURA WHEEL SECTION -->
+        <section id="kura-section" class="bg-cozy-card border border-cozy-border rounded-3xl p-6 sm:p-8 relative overflow-hidden shadow-2xl">
+            <div class="max-w-3xl mx-auto text-center space-y-6">
+                <div>
+                    <span class="text-xs uppercase font-bold tracking-widest text-cozy-accent">Şanslı Kitabı Seçelim</span>
+                    <h2 class="serif-title text-2xl sm:text-3xl font-extrabold text-warm-100 mt-1">Slot Kura Makinesi</h2>
+                    <p class="text-xs sm:text-sm text-warm-300 mt-2">Kategoriyi seçin, kura makinesi o kategorideki kitap sayısı kadar dönsün!</p>
+                </div>
+
+                <!-- Category Selector for Slot -->
+                <div class="flex justify-center">
+                    <select id="slotCategorySelect" onchange="handleSlotCategoryChange()" class="bg-cozy-bg border border-cozy-border text-warm-100 text-sm font-semibold rounded-xl px-4 py-2.5 focus:border-cozy-accent outline-none">
+                        <!-- Dynamic Options -->
+                    </select>
+                </div>
+
+                <!-- Slot Spinner Digital Screen -->
+                <div class="py-6 flex flex-col items-center justify-center">
+                    <div class="w-48 h-32 bg-cozy-bg border-4 border-cozy-border rounded-2xl flex items-center justify-center shadow-inner relative overflow-hidden">
+                        <div class="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/60 pointer-events-none"></div>
+                        <span id="mainSlotDisplay" class="font-mono text-6xl font-black text-cozy-accent tracking-widest">
+                            #01
+                        </span>
+                    </div>
+                    <div id="mainSlotResult" class="mt-4 text-sm font-semibold text-warm-200 min-h-[3rem] flex items-center justify-center">
+                        Kura çekmeye hazır!
+                    </div>
+                </div>
+
+                <div>
+                    <button id="spinMainSlotBtn" onclick="spinMainSlot()" class="px-8 py-3.5 bg-gradient-to-r from-cozy-accent to-amber-600 text-cozy-bg font-extrabold rounded-2xl shadow-xl hover:scale-105 active:scale-95 transition flex items-center justify-center gap-2 mx-auto">
+                        <i class="fa-solid fa-dice-five text-lg"></i>
+                        <span>KURA ÇEK!</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. ARCHIVE & ALL READ BOOKS SECTION -->
+        <section id="archive-section" class="space-y-6">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-cozy-border pb-4">
+                <div>
+                    <h2 class="serif-title text-2xl font-bold text-warm-100">Okunanlar Arşivi</h2>
+                    <p class="text-xs text-warm-300 mt-1">Geçmişte kulüp olarak tamamladığımız tüm kitaplar</p>
+                </div>
+                <!-- Filters -->
+                <div class="flex flex-wrap items-center gap-3">
+                    <select id="archiveGenreFilter" onchange="renderArchive()" class="bg-cozy-card border border-cozy-border text-warm-200 text-xs font-semibold rounded-xl px-3 py-2 outline-none">
+                        <option value="ALL">Tüm Kategoriler</option>
+                    </select>
+                    <select id="archiveYearFilter" onchange="renderArchive()" class="bg-cozy-card border border-cozy-border text-warm-200 text-xs font-semibold rounded-xl px-3 py-2 outline-none">
+                        <option value="ALL">Tüm Yıllar</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Archive Grid -->
+            <div id="archiveGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 sm:gap-6">
+                <!-- Dynamic Archive Cards -->
+            </div>
+        </section>
+
+        <!-- 5. ANALYTICS & STATS SECTION -->
+        <section id="analytics-section" class="space-y-6">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-4">
+                <div>
+                    <h2 class="serif-title text-2xl font-bold text-warm-100">Kulüp İstatistikleri</h2>
+                    <p class="text-xs text-warm-300 mt-1">Aylara ve türlere göre okuma alışkanlıklarımız</p>
+                </div>
+                <select id="statsYearFilter" onchange="renderAnalytics()" class="bg-cozy-card border border-cozy-border text-cozy-accent text-xs font-bold rounded-xl px-3 py-2 outline-none">
+                    <option value="ALL">Tüm Yıllar (İstatistik)</option>
+                </select>
+            </div>
+
+            <!-- Stats Overview Cards -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-5 flex items-center space-x-4 shadow-lg">
+                    <div class="w-12 h-12 rounded-xl bg-cozy-accent/15 border border-cozy-accent/30 flex items-center justify-center text-cozy-accent text-xl">
+                        <i class="fa-solid fa-book"></i>
+                    </div>
+                    <div>
+                        <span class="text-xs text-warm-300 font-medium">Toplam Okunan Kitap</span>
+                        <h3 id="statTotalBooks" class="text-2xl font-bold text-warm-100">0 Kitap</h3>
+                    </div>
+                </div>
+
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-5 flex items-center space-x-4 shadow-lg">
+                    <div class="w-12 h-12 rounded-xl bg-cozy-accent/15 border border-cozy-accent/30 flex items-center justify-center text-cozy-accent text-xl">
+                        <i class="fa-solid fa-file-lines"></i>
+                    </div>
+                    <div>
+                        <span class="text-xs text-warm-300 font-medium">Toplam Okunan Sayfa</span>
+                        <h3 id="statTotalPages" class="text-2xl font-bold text-warm-100">0 Sayfa</h3>
+                    </div>
+                </div>
+
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-5 flex items-center space-x-4 shadow-lg">
+                    <div class="w-12 h-12 rounded-xl bg-cozy-accent/15 border border-cozy-accent/30 flex items-center justify-center text-cozy-accent text-xl">
+                        <i class="fa-solid fa-tags"></i>
+                    </div>
+                    <div>
+                        <span class="text-xs text-warm-300 font-medium">En Çok Okunan Tür</span>
+                        <h3 id="statTopGenre" class="text-2xl font-bold text-warm-100">-</h3>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Container -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Genre Doughnut Chart -->
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-5 shadow-lg space-y-4">
+                    <h3 class="serif-title font-bold text-base text-warm-100">Kategori / Tür Dağılımı</h3>
+                    <div class="relative h-64 w-full">
+                        <canvas id="genreChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Monthly Bar Chart -->
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-5 shadow-lg space-y-4">
+                    <h3 class="serif-title font-bold text-base text-warm-100">Aylara Göre Okunan Sayfa Sayısı</h3>
+                    <div class="relative h-64 w-full">
+                        <canvas id="monthlyPagesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 6. BOOK BINGO SECTION -->
+        <section id="bingo-section" class="space-y-6">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-4">
+                <div>
+                    <h2 class="serif-title text-2xl font-bold text-warm-100">Book Bingo (Okuma Meydan Okuması)</h2>
+                    <p class="text-xs text-warm-300 mt-1">Okuduğunuz kitaplara uyan kutucuklara tıklayarak işaretleyin!</p>
+                </div>
+                <div id="bingoAdminActions" class="hidden">
+                    <button onclick="resetBingo()" class="text-xs text-rose-400 hover:text-rose-300 font-medium">
+                        <i class="fa-solid fa-rotate-left mr-1"></i> Sıfırla
+                    </button>
+                </div>
+            </div>
+
+            <!-- Bingo Grid 5x5 -->
+            <div class="bg-cozy-card border border-cozy-border rounded-3xl p-4 sm:p-6 shadow-2xl">
+                <div id="bingoGrid" class="grid grid-cols-5 gap-2 sm:gap-3">
+                    <!-- Dynamic 25 bingo cells -->
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="bg-cozy-card border-t border-cozy-border py-8 text-center text-xs text-warm-300">
+        <div class="max-w-7xl mx-auto px-4 space-y-2">
+            <p class="font-medium">Online Kitap Kulübü © 2026 • Tüm Hakları Saklıdır.</p>
+            <p class="text-[11px] opacity-60">GitHub Pages & Firebase Realtime Infrastructure</p>
+        </div>
+    </footer>
+
+    <!-- DRAWER: MINI SLOT WHEEL -->
+    <div id="wheelDrawer" class="fixed inset-y-0 left-0 w-80 bg-cozy-card border-r border-cozy-border z-50 transform -translate-x-full transition duration-300 shadow-2xl p-6 flex flex-col justify-between">
+        <div class="space-y-6">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-4">
+                <h3 class="serif-title font-bold text-lg text-warm-100 flex items-center gap-2">
+                    <i class="fa-solid fa-dice-five text-cozy-accent"></i> Hızlı Kura Çek
+                </h3>
+                <button onclick="toggleWheelDrawer()" class="text-warm-300 hover:text-warm-100">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                </button>
+            </div>
+
+            <div class="space-y-3">
+                <label class="text-xs font-semibold text-warm-200 block">Maksimum Sayı (Sınır):</label>
+                <div class="flex items-center gap-2">
+                    <input type="number" id="slotMaxInputDrawer" value="50" min="1" class="w-full bg-cozy-bg border border-cozy-border text-warm-100 text-sm font-bold rounded-xl px-3 py-2 outline-none">
+                    <button onclick="updateSlotMaxDrawer()" class="px-3 py-2 bg-cozy-border text-warm-100 text-xs font-bold rounded-xl hover:bg-cozy-accent hover:text-cozy-bg transition">Set</button>
+                </div>
+            </div>
+
+            <div class="py-4 flex flex-col items-center">
+                <div class="w-36 h-24 bg-cozy-bg border-2 border-cozy-border rounded-xl flex items-center justify-center">
+                    <span id="miniSlotDisplay" class="font-mono text-4xl font-black text-cozy-accent tracking-widest">050</span>
+                </div>
+                <p id="drawerSlotResult" class="mt-3 text-xs text-warm-300 text-center font-medium min-h-[1.5rem]"></p>
+            </div>
+        </div>
+
+        <button id="spinSlotDrawerBtn" onclick="spinDrawerSlot()" class="w-full py-3 bg-cozy-accent text-cozy-bg font-extrabold rounded-xl shadow-lg hover:bg-cozy-accentHover transition">
+            SAYI ÇEK!
+        </button>
+    </div>
+
+    <!-- MODAL 1: ADD TBR BOOK -->
+    <div id="addTbrModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-cozy-card border border-cozy-border rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-3">
+                <h3 class="serif-title font-bold text-lg text-warm-100">TBR Listesine Kitap Ekle</h3>
+                <button onclick="closeModal('addTbrModal')" class="text-warm-300 hover:text-warm-100"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form id="addTbrForm" onsubmit="handleAddTbr(event)" class="space-y-4 text-xs">
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Kitap Adı</label>
+                    <input type="text" id="tbrTitle" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Yazar Adı</label>
+                    <input type="text" id="tbrAuthor" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block font-semibold text-warm-200 mb-1">Sayfa Sayısı</label>
+                        <input type="number" id="tbrPages" required min="1" class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-warm-200 mb-1">Tür / Kategori</label>
+                        <input type="text" id="tbrGenre" required placeholder="ör. Polisiye" class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                    </div>
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Kapak Resmi URL</label>
+                    <input type="url" id="tbrCover" placeholder="https://..." class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="pt-2 flex justify-end space-x-2">
+                    <button type="button" onclick="closeModal('addTbrModal')" class="px-4 py-2 bg-cozy-border text-warm-200 rounded-xl font-bold">İptal</button>
+                    <button type="submit" class="px-5 py-2 bg-cozy-accent text-cozy-bg rounded-xl font-bold hover:bg-cozy-accentHover">Ekle</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 2: CHANGE CURRENT READ -->
+    <div id="changeCurrentModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-cozy-card border border-cozy-border rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-3">
+                <h3 class="serif-title font-bold text-lg text-warm-100">Şu An Okunanı Değiştir</h3>
+                <button onclick="closeModal('changeCurrentModal')" class="text-warm-300 hover:text-warm-100"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form id="changeCurrentForm" onsubmit="handleChangeCurrent(event)" class="space-y-4 text-xs">
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">TBR Listesinden Hızlı Seç</label>
+                    <select id="selectFromTbr" onchange="autoFillCurrentFromTbr()" class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                        <option value="">-- Manuel Gir veya TBR'den Seç --</option>
+                    </select>
+                </div>
+                <hr class="border-cozy-border">
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Kitap Adı</label>
+                    <input type="text" id="curTitle" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Yazar Adı</label>
+                    <input type="text" id="curAuthor" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block font-semibold text-warm-200 mb-1">Sayfa Sayısı</label>
+                        <input type="number" id="curPages" required min="1" class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-warm-200 mb-1">Tür / Kategori</label>
+                        <input type="text" id="curGenre" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                    </div>
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Kapak Resmi URL</label>
+                    <input type="url" id="curCover" placeholder="https://..." class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="pt-2 flex justify-end space-x-2">
+                    <button type="button" onclick="closeModal('changeCurrentModal')" class="px-4 py-2 bg-cozy-border text-warm-200 rounded-xl font-bold">İptal</button>
+                    <button type="submit" class="px-5 py-2 bg-cozy-accent text-cozy-bg rounded-xl font-bold hover:bg-cozy-accentHover">Kaydet</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 3: FINISH BOOK & MOVE TO ARCHIVE -->
+    <div id="finishReadModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-cozy-card border border-cozy-border rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-3">
+                <h3 class="serif-title font-bold text-lg text-warm-100">Kitabı Tamamladık! 🎉</h3>
+                <button onclick="closeModal('finishReadModal')" class="text-warm-300 hover:text-warm-100"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form id="finishReadForm" onsubmit="handleFinishRead(event)" class="space-y-4 text-xs">
+                <div class="p-4 bg-cozy-bg rounded-2xl border border-cozy-border space-y-1">
+                    <h4 id="finishBookTitle" class="font-bold text-sm text-warm-100">Kitap Adı</h4>
+                    <p id="finishBookAuthor" class="text-warm-300">Yazar</p>
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Tamamlanma Ayı / Yılı</label>
+                    <input type="month" id="finishDate" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="pt-2 flex justify-end space-x-2">
+                    <button type="button" onclick="closeModal('finishReadModal')" class="px-4 py-2 bg-cozy-border text-warm-200 rounded-xl font-bold">İptal</button>
+                    <button type="submit" class="px-5 py-2 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-500 shadow-lg">Arşive Taşı</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 4: MANUAL ARCHIVE ADD -->
+    <div id="addArchiveModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-cozy-card border border-cozy-border rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-cozy-border pb-3">
+                <h3 class="serif-title font-bold text-lg text-warm-100">Arşive Kitap Ekle</h3>
+                <button onclick="closeModal('addArchiveModal')" class="text-warm-300 hover:text-warm-100"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form id="addArchiveForm" onsubmit="handleAddArchive(event)" class="space-y-4 text-xs">
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Kitap Adı</label>
+                    <input type="text" id="arcTitle" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Yazar Adı</label>
+                    <input type="text" id="arcAuthor" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block font-semibold text-warm-200 mb-1">Sayfa Sayısı</label>
+                        <input type="number" id="arcPages" required min="1" class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-warm-200 mb-1">Tür / Kategori</label>
+                        <input type="text" id="arcGenre" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                    </div>
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Bitirilme Tarihi (Ay/Yıl)</label>
+                    <input type="month" id="arcDate" required class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div>
+                    <label class="block font-semibold text-warm-200 mb-1">Kapak Resmi URL</label>
+                    <input type="url" id="arcCover" placeholder="https://..." class="w-full bg-cozy-bg border border-cozy-border rounded-xl px-3.5 py-2.5 text-warm-100 outline-none focus:border-cozy-accent">
+                </div>
+                <div class="pt-2 flex justify-end space-x-2">
+                    <button type="button" onclick="closeModal('addArchiveModal')" class="px-4 py-2 bg-cozy-border text-warm-200 rounded-xl font-bold">İptal</button>
+                    <button type="submit" class="px-5 py-2 bg-cozy-accent text-cozy-bg rounded-xl font-bold hover:bg-cozy-accentHover">Ekle</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- JAVASCRIPT LOGIC -->
+    <script>
+        // Global State Variables
+        let isAdmin = false;
+
+        // Categories Configuration according to Page Ranges
+        const TBR_CATEGORIES = [
+            { key: 'xsmall', label: '0-100 Sayfa (XS)', name: 'to-read-01-xsmall-0-100', min: 0, max: 100 },
+            { key: 'small', label: '100-200 Sayfa (S)', name: 'to-read-02-small-100-200', min: 101, max: 200 },
+            { key: 'medium', label: '200-400 Sayfa (M)', name: 'to-read-03-medium-200-400', min: 201, max: 400 },
+            { key: 'large', label: '400-600 Sayfa (L)', name: 'to-read-04-large-400plus', min: 401, max: 600 },
+            { key: 'xlarge', label: '600+ Sayfa (XL)', name: 'to-read-05-xlarge-600plus', min: 601, max: 99999 }
+        ];
+
+        let activeTbrCategory = 'ALL';
+
+        // Sample Default Data
+        let currentRead = {
+            title: "Simyacı",
+            author: "Paulo Coelho",
+            pages: 184,
+            genre: "Felsefi Roman",
+            cover: "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=600"
+        };
+
+        let tbrList = [
+            { id: 'tbr-1', categoryKey: 'xsmall', title: 'Küçük Prens', author: 'Antoine de Saint-Exupéry', pages: 96, genre: 'Klasik', cover: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&q=80&w=600' },
+            { id: 'tbr-2', categoryKey: 'small', title: 'Dönüşüm', author: 'Franz Kafka', pages: 160, genre: 'Klasik', cover: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?auto=format&fit=crop&q=80&w=600' },
+            { id: 'tbr-3', categoryKey: 'medium', title: '1984', author: 'George Orwell', pages: 352, genre: 'Distopya', cover: 'https://images.unsplash.com/photo-1541963463532-d68292c34b19?auto=format&fit=crop&q=80&w=600' },
+            { id: 'tbr-4', categoryKey: 'large', title: 'Cesur Yeni Dünya', author: 'Aldous Huxley', pages: 420, genre: 'Bilim Kurgu', cover: 'https://images.unsplash.com/photo-1532012197267-da84d127e765?auto=format&fit=crop&q=80&w=600' },
+            { id: 'tbr-5', categoryKey: 'xlarge', title: 'Suç ve Ceza', author: 'Fyodor Dostoyevski', pages: 687, genre: 'Klasik', cover: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=600' }
+        ];
+
+        let archiveBooks = [
+            { id: 'arc-1', title: 'Fahrenheit 451', author: 'Ray Bradbury', pages: 208, genre: 'Bilim Kurgu', date: '2026-01', cover: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&q=80&w=600' },
+            { id: 'arc-2', title: 'Körlük', author: 'José Saramago', pages: 336, genre: 'Roman', date: '2026-02', cover: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?auto=format&fit=crop&q=80&w=600' }
+        ];
+
+        let defaultBingoPrompts = [
+            "Kapağında Sarı Olan Kitap", "500 Sayfadan Uzun Kitap", "Ödüllü Çeviri Eser",
+            "Biyografi veya Otobiyografi", "İlk Defa Okuduğun Bir Yazar", "Bir Üçlemenin İlk Kitabı",
+            "Film Adaptasyonu Yapılmış", "İsminde Renk Geçen Kitap", "200 Sayfadan Kısa Kitap",
+            "Klasik Türk Edebiyatı", "Distopya veya Bilim Kurgu", "Kapağında Harita Olan",
+            "SERBEST ALAN (Bingo!)", "Polisiye veya Gerilim", "Bir Kadın Yazarın Eseri",
+            "Kapağında Hayvan Olan", "Şiir veya Tiyatro Oyunu", "Tarihi Roman",
+            "Deniz veya Okyanus Temalı", "Arkadaşının Tavsiye Ettiği", "Kapağında Gece/Yıldız Olan",
+            "Nobel Ödüllü Yazar", "Felsefe veya Psikoloji", "Kitap Kulübü Ortak Seçimi", "Tek Oturuşta Biten Kitap"
+        ];
+        let bingoCompleted = [];
+
+        // Chart instances
+        let genreChartInstance = null;
+        let monthlyChartInstance = null;
+
+        // Slot Spinner State
+        let isSpinningMain = false;
+        let isSpinningDrawer = false;
+        let slotMaxDrawer = 50;
+        let slotMaxMain = 1;
+        let slotWinnerBook = null;
+
+        // Helper: Category detection by page count
+        function getCategoryKeyByPages(pages) {
+            if (pages <= 100) return 'xsmall';
+            if (pages <= 200) return 'small';
+            if (pages <= 400) return 'medium';
+            if (pages <= 600) return 'large';
+            return 'xlarge';
+        }
+
+        // Initialization Logic on Page Load
+        window.onload = function() {
+            renderCurrentRead();
+            renderTbrCategories();
+            renderTbrBooks();
+            renderArchive();
+            renderAnalytics();
+            renderBingo();
+            setupSlotCategorySelect();
+            updateSlotMaxFromSelect();
+
+            if (window.auth && window.auth.currentUser) {
+                window.initFirestoreListeners();
+            }
+        };
+
+        // Admin Toggle
+        function toggleAdminMode() {
+            isAdmin = !isAdmin;
+            document.getElementById('adminBtnText').innerText = isAdmin ? "Admin Modu: Açık" : "Admin Modu: Kapalı";
+            document.getElementById('adminToggleBtn').classList.toggle('bg-cozy-accent', isAdmin);
+            document.getElementById('adminToggleBtn').classList.toggle('text-cozy-bg', isAdmin);
+            document.getElementById('adminBar').classList.toggle('hidden', !isAdmin);
+            document.getElementById('bingoAdminActions').classList.toggle('hidden', !isAdmin);
+            document.getElementById('tbrAddBtnWrapper').classList.toggle('hidden', !isAdmin);
+            
+            // Re-render UI elements dependent on Admin Mode
+            renderCurrentRead();
+            renderTbrBooks();
+        }
+
+        // Modal Handlers
+        function openModal(id) {
+            document.getElementById(id).classList.remove('hidden');
+        }
+        function closeModal(id) {
+            document.getElementById(id).classList.add('hidden');
+        }
+
+        // --- CURRENT READ FUNCTIONS ---
+        function renderCurrentRead() {
+            const container = document.getElementById('currentReadContainer');
+            if (!currentRead || !currentRead.title) {
+                container.innerHTML = `
+                    <div class="text-center py-10 space-y-4">
+                        <i class="fa-solid fa-book-open text-4xl text-cozy-accent/40"></i>
+                        <p class="text-warm-300 text-sm">Şu an okunan aktif bir kitap seçilmedi.</p>
+                        ${isAdmin ? `<button onclick="openModal('changeCurrentModal')" class="px-4 py-2 bg-cozy-accent text-cozy-bg text-xs font-bold rounded-xl">Kitap Seç</button>` : ''}
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = `
+                <div class="flex flex-col md:flex-row items-center md:items-start gap-8">
+                    <div class="w-44 h-64 sm:w-52 sm:h-76 flex-shrink-0 rounded-2xl overflow-hidden shadow-2xl border border-cozy-border relative group">
+                        <img src="${currentRead.cover}" alt="${currentRead.title}" class="w-full h-full object-cover" onerror="this.src='https://placehold.co/400x600/221f1c/d9a362?text=Kapak+Yok'">
+                        <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-60"></div>
+                    </div>
+
+                    <div class="flex-grow space-y-5 text-center md:text-left w-full">
+                        <div class="space-y-1">
+                            <span class="inline-block px-3 py-1 rounded-full text-xs font-bold bg-cozy-accent/15 text-cozy-accent border border-cozy-accent/30 uppercase tracking-wider">
+                                ${currentRead.genre || 'Tür Belirtilmedi'}
+                            </span>
+                            <h3 class="serif-title text-2xl sm:text-4xl font-extrabold text-warm-100">${currentRead.title}</h3>
+                            <p class="text-base font-medium text-warm-300">Yazar: <span class="text-warm-100">${currentRead.author}</span></p>
+                        </div>
+
+                        <div class="flex flex-wrap items-center justify-center md:justify-start gap-6 py-2 border-y border-cozy-border">
+                            <div class="flex items-center space-x-2">
+                                <i class="fa-solid fa-file-lines text-cozy-accent"></i>
+                                <span class="text-sm font-semibold text-warm-200">${currentRead.pages} Sayfa</span>
+                            </div>
+                        </div>
+
+                        ${isAdmin ? `
+                            <div class="pt-2 flex flex-wrap justify-center md:justify-start gap-3">
+                                <button onclick="openModal('changeCurrentModal')" class="px-4 py-2 bg-cozy-border hover:bg-cozy-border/80 text-warm-100 text-xs font-bold rounded-xl transition flex items-center gap-2">
+                                    <i class="fa-solid fa-arrows-rotate"></i>
+                                    <span>Değiştir</span>
+                                </button>
+                                <button onclick="openFinishModal()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-2 shadow-md">
+                                    <i class="fa-solid fa-check"></i>
+                                    <span>Kitabı Bitirdik (Arşive Taşı)</span>
+                                </button>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- CATEGORIZED TBR FUNCTIONS ---
+        function renderTbrCategories() {
+            const tabsContainer = document.getElementById('tbrCategoryTabs');
+            let totalCount = tbrList.length;
+            document.getElementById('tbrTotalBadge').innerText = `${totalCount} Kitap`;
+
+            let html = `
+                <button onclick="setTbrCategoryFilter('ALL')" class="px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-2 ${activeTbrCategory === 'ALL' ? 'bg-cozy-accent text-cozy-bg shadow' : 'bg-cozy-card border border-cozy-border text-warm-200 hover:border-cozy-accent'}">
+                    <span>Tüm Kitaplar</span>
+                    <span class="px-1.5 py-0.5 rounded-md text-[10px] ${activeTbrCategory === 'ALL' ? 'bg-cozy-bg/20 text-cozy-bg' : 'bg-cozy-bg text-cozy-accent'}">${totalCount}</span>
+                </button>
+            `;
+
+            TBR_CATEGORIES.forEach(cat => {
+                const catCount = tbrList.filter(b => b.categoryKey === cat.key).length;
+                const isActive = activeTbrCategory === cat.key;
+                html += `
+                    <button onclick="setTbrCategoryFilter('${cat.key}')" class="px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-2 ${isActive ? 'bg-cozy-accent text-cozy-bg shadow' : 'bg-cozy-card border border-cozy-border text-warm-200 hover:border-cozy-accent'}">
+                        <span>${cat.label}</span>
+                        <span class="px-1.5 py-0.5 rounded-md text-[10px] ${isActive ? 'bg-cozy-bg/20 text-cozy-bg' : 'bg-cozy-bg text-cozy-accent'}">${catCount}</span>
+                    </button>
+                `;
+            });
+
+            tabsContainer.innerHTML = html;
+        }
+
+        function setTbrCategoryFilter(key) {
+            activeTbrCategory = key;
+            renderTbrCategories();
+            renderTbrBooks();
+        }
+
+        function renderTbrBooks() {
+            const grid = document.getElementById('tbrGrid');
+            let filtered = tbrList;
+            if (activeTbrCategory !== 'ALL') {
+                filtered = tbrList.filter(b => b.categoryKey === activeTbrCategory);
+            }
+
+            if (filtered.length === 0) {
+                grid.innerHTML = `
+                    <div class="col-span-full py-12 text-center text-warm-300 space-y-2">
+                        <i class="fa-solid fa-box-open text-3xl opacity-40"></i>
+                        <p class="text-sm">Bu kategoride henüz kitap eklenmedi.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            grid.innerHTML = filtered.map((book, index) => `
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-3 flex flex-col justify-between shadow-lg hover:border-cozy-accent/60 transition group relative">
+                    <div class="space-y-3">
+                        <div class="w-full h-48 rounded-xl overflow-hidden relative">
+                            <img src="${book.cover}" alt="${book.title}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" onerror="this.src='https://placehold.co/300x400/221f1c/d9a362?text=Kapak+Yok'">
+                            <span class="absolute top-2 left-2 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-black/75 backdrop-blur-sm text-cozy-accent border border-cozy-accent/30">
+                                #${index + 1}
+                            </span>
+                        </div>
+                        <div>
+                            <span class="text-[10px] uppercase font-bold text-cozy-accent tracking-wider block">${book.genre}</span>
+                            <h4 class="serif-title font-bold text-sm text-warm-100 line-clamp-1">${book.title}</h4>
+                            <p class="text-xs text-warm-300 line-clamp-1">${book.author}</p>
+                            <p class="text-[11px] text-warm-200 mt-1"><i class="fa-regular fa-file-lines mr-1 text-cozy-accent"></i>${book.pages} Sayfa</p>
+                        </div>
+                    </div>
+
+                    ${isAdmin ? `
+                        <div class="pt-3 border-t border-cozy-border/60 flex items-center justify-between mt-3">
+                            <button onclick="setCurrentFromTbrId('${book.id}')" class="text-xs text-cozy-accent hover:underline font-semibold flex items-center gap-1">
+                                <i class="fa-solid fa-play"></i> Okumaya Başla
+                            </button>
+                            <button onclick="deleteTbrBook('${book.id}')" class="text-xs text-rose-400 hover:text-rose-300 p-1">
+                                <i class="fa-solid fa-trash-can"></i>
+                            </button>
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        function handleAddTbr(e) {
+            e.preventDefault();
+            const title = document.getElementById('tbrTitle').value.trim();
+            const author = document.getElementById('tbrAuthor').value.trim();
+            const pages = parseInt(document.getElementById('tbrPages').value);
+            const genre = document.getElementById('tbrGenre').value.trim();
+            const cover = document.getElementById('tbrCover').value.trim();
+
+            const categoryKey = getCategoryKeyByPages(pages);
+
+            const newBook = {
+                id: 'tbr-' + Date.now(),
+                categoryKey: categoryKey,
+                title,
+                author,
+                pages,
+                genre,
+                cover
+            };
+
+            if (window.saveTbrBookToDb) {
+                window.saveTbrBookToDb(newBook);
+            } else {
+                tbrList.push(newBook);
+            }
+
+            closeModal('addTbrModal');
+            document.getElementById('addTbrForm').reset();
+            
+            renderTbrCategories();
+            renderTbrBooks();
+            setupSlotCategorySelect();
+            updateSlotMaxFromSelect();
+        }
+
+        function deleteTbrBook(id) {
+            if (window.deleteTbrBookFromDb) {
+                window.deleteTbrBookFromDb(id);
+            } else {
+                tbrList = tbrList.filter(b => b.id !== id);
+                renderTbrCategories();
+                renderTbrBooks();
+                setupSlotCategorySelect();
+                updateSlotMaxFromSelect();
+            }
+        }
+
+        function setCurrentFromTbrId(id) {
+            const book = tbrList.find(b => b.id === id);
+            if (!book) return;
+            
+            currentRead = {
+                title: book.title,
+                author: book.author,
+                pages: book.pages,
+                genre: book.genre,
+                cover: book.cover
+            };
+            
+            if (window.saveCurrentReadToDb) {
+                window.saveCurrentReadToDb(currentRead);
+                window.deleteTbrBookFromDb(id);
+            } else {
+                tbrList = tbrList.filter(b => b.id !== id);
+                renderCurrentRead();
+                renderTbrCategories();
+                renderTbrBooks();
+                setupSlotCategorySelect();
+                updateSlotMaxFromSelect();
+            }
+
+            window.scrollTo({ top: document.getElementById('current-read').offsetTop - 100, behavior: 'smooth' });
+        }
+
+        // --- SLOT & KURA SYSTEM LOGIC ---
+        function toggleWheelDrawer() {
+            const drawer = document.getElementById('wheelDrawer');
+            drawer.classList.toggle('-translate-x-full');
+        }
+
+        function setupSlotCategorySelect() {
+            const select = document.getElementById('slotCategorySelect');
+            if (!select) return;
+
+            select.innerHTML = TBR_CATEGORIES.map(cat => {
+                const count = tbrList.filter(b => b.categoryKey === cat.key).length;
+                return `<option value="${cat.key}">${cat.name} (${count} Kitap)</option>`;
+            }).join('');
+        }
+
+        function handleSlotCategoryChange() {
+            updateSlotMaxFromSelect();
+        }
+
+        function updateSlotMaxFromSelect() {
+            const select = document.getElementById('slotCategorySelect');
+            if (!select) return;
+
+            const categoryKey = select.value;
+            const booksInCategory = tbrList.filter(b => b.categoryKey === categoryKey);
+            slotMaxMain = booksInCategory.length;
+
+            const display = document.getElementById('mainSlotDisplay');
+            if (slotMaxMain === 0) {
+                display.innerText = "#0";
+                document.getElementById('mainSlotResult').innerText = "Bu kategoride henüz kitap yok. Lütfen kitap ekleyin.";
+            } else {
+                display.innerText = "#01";
+                document.getElementById('mainSlotResult').innerText = `1 ile ${slotMaxMain} arasında kura çekebilirsiniz.`;
+            }
+        }
+
+        function spinMainSlot() {
+            if (isSpinningMain) return;
+
+            const categoryKey = document.getElementById('slotCategorySelect').value;
+            const booksInCategory = tbrList.filter(b => b.categoryKey === categoryKey);
+            const count = booksInCategory.length;
+
+            if (count === 0) {
+                alert("Seçilen kategoride hiç kitap yok!");
+                return;
+            }
+
+            isSpinningMain = true;
+            const btn = document.getElementById('spinMainSlotBtn');
+            const display = document.getElementById('mainSlotDisplay');
+            const resultDiv = document.getElementById('mainSlotResult');
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+
+            // Winner index (1-based index in that category)
+            const winningIndex = Math.floor(Math.random() * count) + 1;
+            slotWinnerBook = booksInCategory[winningIndex - 1];
+
+            let speed = 40;
+            let counter = 0;
+            let totalSteps = 40 + Math.floor(Math.random() * 20);
+
+            resultDiv.innerText = "Çark/Slot dönüyor... Kazanan belirleniyor!";
+
+            function animateSlot() {
+                counter++;
+                const randomVal = Math.floor(Math.random() * count) + 1;
+                display.innerText = "#" + String(randomVal).padStart(2, '0');
+
+                if (counter < totalSteps) {
+                    setTimeout(animateSlot, speed + (counter * 5));
+                } else {
+                    // Stop on actual winner
+                    display.innerText = "#" + String(winningIndex).padStart(2, '0');
+                    isSpinningMain = false;
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50');
+
+                    resultDiv.innerHTML = `
+                        <div class="space-y-2 animate-bounce">
+                            <span class="text-xs uppercase font-bold text-cozy-accent tracking-widest">🎉 KAZANAN KİTAP #${winningIndex} 🎉</span>
+                            <h4 class="serif-title text-base font-bold text-warm-100">${slotWinnerBook.title} - ${slotWinnerBook.author} (${slotWinnerBook.pages} Sayfa)</h4>
+                            ${isAdmin ? `
+                                <button onclick="setCurrentFromTbrId('${slotWinnerBook.id}')" class="mt-2 px-3 py-1.5 bg-cozy-accent text-cozy-bg font-bold rounded-xl text-xs">
+                                    Bu Kitabı Şu An Okunuyor Yap
+                                </button>
+                            ` : ''}
+                        </div>
+                    `;
+                }
+            }
+
+            animateSlot();
+        }
+
+        function updateSlotMaxDrawer() {
+            const input = document.getElementById('slotMaxInputDrawer');
+            let val = parseInt(input.value);
+            if (isNaN(val) || val < 1) val = 1;
+            slotMaxDrawer = val;
+            document.getElementById('miniSlotDisplay').innerText = String(val).padStart(3, '0');
+        }
+
+        function spinDrawerSlot() {
+            if (isSpinningDrawer) return;
+            isSpinningDrawer = true;
+
+            const btn = document.getElementById('spinSlotDrawerBtn');
+            const display = document.getElementById('miniSlotDisplay');
+            const result = document.getElementById('drawerSlotResult');
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+
+            const winner = Math.floor(Math.random() * (slotMaxDrawer + 1));
+            let counter = 0;
+            let steps = 30;
+
+            function animateDrawer() {
+                counter++;
+                const rand = Math.floor(Math.random() * (slotMaxDrawer + 1));
+                display.innerText = String(rand).padStart(3, '0');
+
+                if (counter < steps) {
+                    setTimeout(animateDrawer, 40 + counter * 6);
+                } else {
+                    display.innerText = String(winner).padStart(3, '0');
+                    isSpinningDrawer = false;
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50');
+                    result.innerText = `Çıkan Numara: ${winner}`;
+                }
+            }
+            animateDrawer();
+        }
+
+        // --- CHANGE CURRENT & FINISH READ MODALS ---
+        function openFinishModal() {
+            if (!currentRead || !currentRead.title) return;
+            document.getElementById('finishBookTitle').innerText = currentRead.title;
+            document.getElementById('finishBookAuthor').innerText = `${currentRead.author} • ${currentRead.pages} Sayfa`;
+            
+            const now = new Date();
+            const currentMonth = now.toISOString().slice(0, 7);
+            document.getElementById('finishDate').value = currentMonth;
+            
+            openModal('finishReadModal');
+        }
+
+        function handleFinishRead(e) {
+            e.preventDefault();
+            const date = document.getElementById('finishDate').value;
+
+            const completedBook = {
+                id: 'arc-' + Date.now(),
+                title: currentRead.title,
+                author: currentRead.author,
+                pages: currentRead.pages,
+                genre: currentRead.genre,
+                cover: currentRead.cover,
+                date: date
+            };
+
+            if (window.saveArchiveBookToDb && window.saveCurrentReadToDb) {
+                window.saveArchiveBookToDb(completedBook);
+                window.saveCurrentReadToDb(null);
+            } else {
+                archiveBooks.unshift(completedBook);
+                currentRead = null;
+                renderCurrentRead();
+                renderArchive();
+                renderAnalytics();
+            }
+
+            closeModal('finishReadModal');
+        }
+
+        function handleChangeCurrent(e) {
+            e.preventDefault();
+            const title = document.getElementById('curTitle').value.trim();
+            const author = document.getElementById('curAuthor').value.trim();
+            const pages = parseInt(document.getElementById('curPages').value);
+            const genre = document.getElementById('curGenre').value.trim();
+            const cover = document.getElementById('curCover').value.trim();
+
+            const selectedTbrId = document.getElementById('selectFromTbr').value;
+            if (selectedTbrId) {
+                if (window.deleteTbrBookFromDb) {
+                    window.deleteTbrBookFromDb(selectedTbrId);
+                } else {
+                    tbrList = tbrList.filter(b => b.id !== selectedTbrId);
+                }
+            }
+
+            currentRead = { title, author, pages, genre, cover };
+            
+            if (window.saveCurrentReadToDb) {
+                window.saveCurrentReadToDb(currentRead);
+            } else {
+                renderCurrentRead();
+                renderTbrCategories();
+                renderTbrBooks();
+                setupSlotCategorySelect();
+                updateSlotMaxFromSelect();
+            }
+
+            closeModal('changeCurrentModal');
+            document.getElementById('changeCurrentForm').reset();
+        }
+
+        function autoFillCurrentFromTbr() {
+            const select = document.getElementById('selectFromTbr');
+            const id = select.value;
+            if (!id) return;
+            const book = tbrList.find(b => b.id === id);
+            if (!book) return;
+
+            document.getElementById('curTitle').value = book.title;
+            document.getElementById('curAuthor').value = book.author;
+            document.getElementById('curPages').value = book.pages;
+            document.getElementById('curGenre').value = book.genre;
+            document.getElementById('curCover').value = book.cover;
+        }
+
+        // --- ARCHIVE LOGIC ---
+        function renderArchive() {
+            const grid = document.getElementById('archiveGrid');
+            const genreFilter = document.getElementById('archiveGenreFilter').value;
+            const yearFilter = document.getElementById('archiveYearFilter').value;
+
+            // Populate Filter Selects
+            populateArchiveFilterOptions();
+
+            let filtered = archiveBooks;
+            if (genreFilter !== 'ALL') {
+                filtered = filtered.filter(b => b.genre === genreFilter);
+            }
+            if (yearFilter !== 'ALL') {
+                filtered = filtered.filter(b => b.date && b.date.startsWith(yearFilter));
+            }
+
+            if (filtered.length === 0) {
+                grid.innerHTML = `
+                    <div class="col-span-full py-12 text-center text-warm-300 space-y-2">
+                        <i class="fa-solid fa-box-archive text-3xl opacity-40"></i>
+                        <p class="text-sm">Arşivde gösterilecek kitap bulunamadı.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            grid.innerHTML = filtered.map(book => `
+                <div class="bg-cozy-card border border-cozy-border rounded-2xl p-3 flex flex-col justify-between shadow-lg relative group">
+                    <div class="space-y-3">
+                        <div class="w-full h-48 rounded-xl overflow-hidden relative">
+                            <img src="${book.cover}" alt="${book.title}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" onerror="this.src='https://placehold.co/300x400/221f1c/d9a362?text=Kapak+Yok'">
+                            <span class="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-cozy-accent/90 text-cozy-bg">
+                                ${book.date || 'Tarih Yok'}
+                            </span>
+                        </div>
+                        <div>
+                            <span class="text-[10px] uppercase font-bold text-cozy-accent tracking-wider block">${book.genre}</span>
+                            <h4 class="serif-title font-bold text-sm text-warm-100 line-clamp-1">${book.title}</h4>
+                            <p class="text-xs text-warm-300 line-clamp-1">${book.author}</p>
+                            <p class="text-[11px] text-warm-200 mt-1"><i class="fa-regular fa-file-lines mr-1 text-cozy-accent"></i>${book.pages} Sayfa</p>
+                        </div>
+                    </div>
+                    ${isAdmin ? `
+                        <div class="pt-2 border-t border-cozy-border/60 flex justify-end mt-2">
+                            <button onclick="deleteArchiveBook('${book.id}')" class="text-xs text-rose-400 hover:text-rose-300 p-1">
+                                <i class="fa-solid fa-trash-can"></i> Sil
+                            </button>
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        function populateArchiveFilterOptions() {
+            const genreSelect = document.getElementById('archiveGenreFilter');
+            const yearSelect = document.getElementById('archiveYearFilter');
+
+            const genres = ['ALL', ...new Set(archiveBooks.map(b => b.genre))];
+            const years = ['ALL', ...new Set(archiveBooks.map(b => b.date ? b.date.split('-')[0] : null).filter(Boolean))];
+
+            const currentGenre = genreSelect.value;
+            const currentYear = yearSelect.value;
+
+            genreSelect.innerHTML = genres.map(g => `<option value="${g}" ${g === currentGenre ? 'selected' : ''}>${g === 'ALL' ? 'Tüm Kategoriler' : g}</option>`).join('');
+            yearSelect.innerHTML = years.map(y => `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y === 'ALL' ? 'Tüm Yıllar' : y}</option>`).join('');
+        }
+
+        function handleAddArchive(e) {
+            e.preventDefault();
+            const title = document.getElementById('arcTitle').value.trim();
+            const author = document.getElementById('arcAuthor').value.trim();
+            const pages = parseInt(document.getElementById('arcPages').value);
+            const genre = document.getElementById('arcGenre').value.trim();
+            const date = document.getElementById('arcDate').value;
+            const cover = document.getElementById('arcCover').value.trim();
+
+            const newBook = { id: 'arc-' + Date.now(), title, author, pages, genre, date, cover };
+
+            if (window.saveArchiveBookToDb) {
+                window.saveArchiveBookToDb(newBook);
+            } else {
+                archiveBooks.unshift(newBook);
+                renderArchive();
+                renderAnalytics();
+            }
+
+            closeModal('addArchiveModal');
+            document.getElementById('addArchiveForm').reset();
+        }
+
+        function deleteArchiveBook(id) {
+            if (window.deleteArchiveBookFromDb) {
+                window.deleteArchiveBookFromDb(id);
+            } else {
+                archiveBooks = archiveBooks.filter(b => b.id !== id);
+                renderArchive();
+                renderAnalytics();
+            }
+        }
+
+        // --- ANALYTICS / CHART.JS LOGIC ---
+        function renderAnalytics() {
+            const yearFilterSelect = document.getElementById('statsYearFilter');
+            const years = ['ALL', ...new Set(archiveBooks.map(b => b.date ? b.date.split('-')[0] : null).filter(Boolean))];
+
+            const currentYear = yearFilterSelect.value || 'ALL';
+            yearFilterSelect.innerHTML = years.map(y => `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y === 'ALL' ? 'Tüm Yıllar (İstatistik)' : y + ' Yılı'}</option>`).join('');
+
+            let filtered = archiveBooks;
+            if (currentYear !== 'ALL') {
+                filtered = filtered.filter(b => b.date && b.date.startsWith(currentYear));
+            }
+
+            // Overview calculations
+            const totalBooks = filtered.length;
+            const totalPages = filtered.reduce((sum, b) => sum + (parseInt(b.pages) || 0), 0);
+
+            const genreCounts = {};
+            filtered.forEach(b => {
+                genreCounts[b.genre] = (genreCounts[b.genre] || 0) + 1;
+            });
+
+            let topGenre = "-";
+            let maxCount = 0;
+            Object.keys(genreCounts).forEach(g => {
+                if (genreCounts[g] > maxCount) {
+                    maxCount = genreCounts[g];
+                    topGenre = g;
+                }
+            });
+
+            document.getElementById('statTotalBooks').innerText = `${totalBooks} Kitap`;
+            document.getElementById('statTotalPages').innerText = `${totalPages.toLocaleString()} Sayfa`;
+            document.getElementById('statTopGenre').innerText = topGenre;
+
+            // Render Charts
+            renderGenreChart(genreCounts);
+            renderMonthlyPagesChart(filtered);
+        }
+
+        function renderGenreChart(genreCounts) {
+            const ctx = document.getElementById('genreChart').getContext('2d');
+            if (genreChartInstance) genreChartInstance.destroy();
+
+            const labels = Object.keys(genreCounts);
+            const data = Object.values(genreCounts);
+
+            genreChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels.length ? labels : ['Veri Yok'],
+                    datasets: [{
+                        data: data.length ? data : [1],
+                        backgroundColor: ['#d9a362', '#36322d', '#5c4838', '#8c6b4f', '#a68568', '#f4efe6'],
+                        borderColor: '#221f1c',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { labels: { color: '#e6dac8', font: { family: 'Inter' } } }
+                    }
+                }
+            });
+        }
+
+        function renderMonthlyPagesChart(books) {
+            const ctx = document.getElementById('monthlyPagesChart').getContext('2d');
+            if (monthlyChartInstance) monthlyChartInstance.destroy();
+
+            const monthNames = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
+            const monthlyPages = new Array(12).fill(0);
+
+            books.forEach(b => {
+                if (b.date) {
+                    const parts = b.date.split('-');
+                    if (parts.length === 2) {
+                        const mIndex = parseInt(parts[1]) - 1;
+                        if (mIndex >= 0 && mIndex < 12) {
+                            monthlyPages[mIndex] += (parseInt(b.pages) || 0);
+                        }
+                    }
+                }
+            });
+
+            monthlyChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: monthNames,
+                    datasets: [{
+                        label: 'Okunan Sayfa',
+                        data: monthlyPages,
+                        backgroundColor: '#d9a362',
+                        borderRadius: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { ticks: { color: '#e6dac8' }, grid: { display: false } },
+                        y: { ticks: { color: '#e6dac8' }, grid: { color: '#36322d' } }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+        }
+
+        // --- BINGO LOGIC ---
+        function renderBingo() {
+            const grid = document.getElementById('bingoGrid');
+            grid.innerHTML = defaultBingoPrompts.map((prompt, idx) => {
+                const isChecked = bingoCompleted.includes(idx);
+                return `
+                    <button onclick="toggleBingoCell(${idx})" class="bingo-cell relative aspect-square bg-cozy-bg border border-cozy-border rounded-xl p-2 sm:p-3 text-[10px] sm:text-xs font-medium text-warm-200 hover:border-cozy-accent flex items-center justify-center text-center transition ${isChecked ? 'completed' : ''}">
+                        <span>${prompt}</span>
+                    </button>
+                `;
+            }).join('');
+        }
+
+        function toggleBingoCell(index) {
+            if (bingoCompleted.includes(index)) {
+                bingoCompleted = bingoCompleted.filter(i => i !== index);
+            } else {
+                bingoCompleted.push(index);
+            }
+
+            if (window.saveBingoToDb) {
+                window.saveBingoToDb(bingoCompleted);
+            } else {
+                renderBingo();
+            }
+        }
+
+        function resetBingo() {
+            if (confirm("Tüm bingo işaretlerinizi sıfırlamak istediğinize emin misiniz?")) {
+                bingoCompleted = [];
+                if (window.saveBingoToDb) {
+                    window.saveBingoToDb(bingoCompleted);
+                } else {
+                    renderBingo();
+                }
+            }
+        }
+    </script>
+</body>
+</html>
